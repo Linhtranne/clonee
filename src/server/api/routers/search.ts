@@ -1,44 +1,31 @@
 import { z } from "zod";
-import {
-    createTRPCRouter,
-    publicProcedure
-} from "@/server/api/trpc";
-import { GET_USER } from "@/server/constant";
+import { createTRPCRouter, publicProcedure } from "@/server/api/trpc";
+import type { User } from "./user";
 
 export const searchRouter = createTRPCRouter({
+  allUsers: publicProcedure
+    .input(
+      z.object({
+        debouncedSearch: z.string(),
+      }),
+    )
+    .query(async ({ input }) => {
+      const response = await fetch(`http://localhost:3001/users`);
+      const allUsers = (await response.json()) as User[];
 
-    allUsers: publicProcedure
-        .input(
-            z.object({
-                debouncedSearch: z.string()
-            })
-        )
-        .query(async ({ input, ctx }) => {
-            const user = await ctx.db.user.findMany({
-                where: {
-                    OR: [
-                        {
-                            fullname: {
-                                contains: input.debouncedSearch
-                            }
-                        },
-                        {
-                            username: {
-                                contains: input.debouncedSearch
-                            }
-                        },
-                        {
-                            email: {
-                                contains: input.debouncedSearch
-                            }
-                        },
-                    ],
-                },
-                select: {
-                    ...GET_USER
-                }
-            });
-            return user
-        }),
+      const filteredUsers = allUsers.filter(
+        (user: User) =>
+          (user.fullname ?? "")
+            .toLowerCase()
+            .includes(input.debouncedSearch.toLowerCase()) ||
+          (user.username ?? "")
+            .toLowerCase()
+            .includes(input.debouncedSearch.toLowerCase()) ||
+          (user.email ?? "")
+            .toLowerCase()
+            .includes(input.debouncedSearch.toLowerCase()),
+      );
 
+      return filteredUsers;
+    }),
 });

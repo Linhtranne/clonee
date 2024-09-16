@@ -18,7 +18,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://threads.codebustar.com'),
+  metadataBase: new URL("https://threads.codebustar.com"),
   title: {
     default: siteConfig.name,
     template: `%s • ${siteConfig.name}`,
@@ -26,14 +26,13 @@ export const metadata: Metadata = {
   description: siteConfig.description,
   keywords: [
     "nextjs",
-    "prisma",
     "tRPC",
     "sujjeee",
     "threads",
     "threads-clone",
     "t3-stack",
     "uploadthing",
-    "shadcn ui"
+    "shadcn ui",
   ],
   authors: [
     {
@@ -60,7 +59,7 @@ export const metadata: Metadata = {
   icons: {
     icon: "/favicon.ico",
   },
-}
+};
 
 export const viewport: Viewport = {
   colorScheme: "dark light",
@@ -68,7 +67,7 @@ export const viewport: Viewport = {
     { media: "(prefers-color-scheme: light)", color: "white" },
     { media: "(prefers-color-scheme: dark)", color: "black" },
   ],
-}
+};
 
 export default function RootLayout({
   children,
@@ -78,7 +77,7 @@ export default function RootLayout({
   return (
     <ClerkProvider>
       <html lang="en">
-        <body className={`font-sans no-scrollbar ${inter.variable}`}>
+        <body className={`no-scrollbar font-sans ${inter.variable}`}>
           <TRPCReactProvider headers={headers()}>
             <ThemeProvider
               attribute="class"

@@ -24,7 +24,7 @@ const SearchPage: React.FC = ({ }) => {
         trpc: { abortOnUnmount: true }
     })
 
-    const allUsers = data?.pages.flatMap((page) => page.allUsers)
+    const allUsers = data?.pages.flatMap((page) => page.allUsers) ?? [];
 
     if (isError) return <Error />
 

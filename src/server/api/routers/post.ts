@@ -3,22 +3,41 @@ import { TRPCError } from "@trpc/server";
 import {
   createTRPCRouter,
   privateProcedure,
-  publicProcedure
+  publicProcedure,
 } from "@/server/api/trpc";
-import { getUserEmail } from "@/lib/utils";
-import { PostPrivacy, Prisma } from "@prisma/client";
-import Filter from 'bad-words';
-import {
-  GET_USER,
-  GET_COUNT,
-  GET_REPOSTS,
-  GET_REPLIES,
-  GET_LIKES
-} from "@/server/constant";
-import type { ParentPostsProps } from "@/types";
+import Filter from "bad-words";
+import type { User } from "@/types";
+import { PostPrivacy } from "@/enums";
+import type { Like } from "./like";
+import type { Notification } from "./notification";
+
+export interface Post {
+  id: string;
+  createdAt: string;
+  author: User;
+  authorId: string;
+  text: string;
+  images: string[];
+  likes: Like[];
+  parentPostId: string | null;
+  parentPost: Post | null;
+  replies: Post[];
+  notification: Notification[];
+  reposts: Repost[];
+  quoteId: string | null;
+  privacy: PostPrivacy;
+  reports: Report[];
+}
+
+export interface Repost {
+  createdAt: string;
+  post: Post;
+  postId: string;
+  user: User;
+  userId: string;
+}
 
 export const postRouter = createTRPCRouter({
-
   createPost: privateProcedure
     .input(
       z.object({
@@ -26,73 +45,53 @@ export const postRouter = createTRPCRouter({
           message: "Text must be at least 3 character",
         }),
         imageUrl: z.string().optional(),
-        privacy: z.nativeEnum(PostPrivacy).default('ANYONE'),
+        privacy: z.nativeEnum(PostPrivacy).default(PostPrivacy.ANYONE),
         quoteId: z.string().optional(),
-        postAuthor: z.string().optional()
-      })
+        postAuthor: z.string().optional(),
+      }),
     )
     .mutation(async ({ ctx, input }) => {
-      const { user, userId } = ctx;
-      const email = getUserEmail(user)
-      const dbUser = await ctx.db.user.findUnique({
-        where: {
-          email: email
+      const { userId } = ctx;
+      const filter = new Filter();
+      const filteredText = filter.clean(input.text);
+
+      const response = await fetch("http://localhost:3001/posts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-        select: {
-          verified: true
-        }
-      })
-
-      if (!dbUser) {
-        throw new TRPCError({ code: 'NOT_FOUND' })
-      }
-
-      const filter = new Filter()
-      const filteredText = filter.clean(input.text)
-
-      const transactionResult = await ctx.db.$transaction(async (prisma) => {
-
-        const newpost = await ctx.db.post.create({
-          data: {
-            text: filteredText,
-            authorId: userId,
-            images: input.imageUrl ? [input.imageUrl] : [],
-            privacy: input.privacy,
-            quoteId: input.quoteId
-          },
-          select: {
-            id: true,
-            author: true
-          }
-        })
-
-        if (input.postAuthor && userId !== input.postAuthor) {
-          await prisma.notification.create({
-            data: {
-              type: 'QUOTE',
-              senderUserId: userId,
-              receiverUserId: input.postAuthor,
-              postId: newpost.id,
-              message: input.text
-            }
-          });
-        }
-
-        return {
-          newpost,
-        };
-
+        body: JSON.stringify({
+          text: filteredText,
+          authorId: userId,
+          images: input.imageUrl ? [input.imageUrl] : [],
+          privacy: input.privacy,
+          quoteId: input.quoteId,
+          createdAt: new Date().toISOString(),
+        }),
       });
 
-      if (!transactionResult) {
-        throw new TRPCError({ code: 'NOT_IMPLEMENTED' })
+      const newpost = (await response.json()) as Post;
+
+      if (input.postAuthor && userId !== input.postAuthor) {
+        await fetch("http://localhost:3001/notifications", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            type: "QUOTE",
+            senderUserId: userId,
+            receiverUserId: input.postAuthor,
+            postId: newpost.id,
+            message: input.text,
+          }),
+        });
       }
 
       return {
-        createPost: transactionResult.newpost,
-        success: true
-      }
-
+        createPost: newpost,
+        success: true,
+      };
     }),
 
   getInfinitePost: publicProcedure
@@ -101,164 +100,81 @@ export const postRouter = createTRPCRouter({
         searchQuery: z.string().optional(),
         limit: z.number().optional(),
         cursor: z.object({ id: z.string(), createdAt: z.date() }).optional(),
-      })
+      }),
     )
-    .query(async ({ input: { limit = 10, cursor, searchQuery }, ctx }) => {
-      const allPosts = await ctx.db.post.findMany({
-        where: {
-          text: {
-            contains: searchQuery
-          },
-          parentPostId: null
-        },
-        take: limit + 1,
-        cursor: cursor ? { createdAt_id: cursor } : undefined,
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        select: {
-          id: true,
-          createdAt: true,
-          text: true,
-          images: true,
-          parentPostId: true,
-          quoteId: true,
-          author: {
-            select: {
-              ...GET_USER,
-            }
-          },
-          ...GET_LIKES,
-          ...GET_REPLIES,
-          ...GET_COUNT,
-          ...GET_REPOSTS
-        },
-      });
+    .query(async ({ input: { limit = 10, cursor, searchQuery } }) => {
+      try {
+        const response = await fetch(
+          `http://localhost:3001/posts?text_like=${searchQuery}&parentPostId=null&_sort=createdAt,id&_order=desc,desc&_limit=${limit + 1}`,
+        );
+        const allPosts: Post[] = (await response.json()) as Post[];
 
-      let nextCursor: typeof cursor | undefined;
+        let nextCursor: typeof cursor | undefined;
 
-      if (allPosts.length > limit) {
-        const nextItem = allPosts.pop();
-        if (nextItem != null) {
-          nextCursor = { id: nextItem.id, createdAt: nextItem.createdAt };
+        if (allPosts.length > limit) {
+          const nextItem = allPosts.pop();
+          if (nextItem != null) {
+            nextCursor = {
+              id: nextItem.id,
+              createdAt: new Date(nextItem.createdAt),
+            };
+          }
         }
-      }
 
-      return {
-        posts: allPosts.map((post) => ({
-          id: post.id,
-          createdAt: post.createdAt,
-          text: post.text,
-          parentPostId: post.parentPostId,
-          author: post.author,
-          count: {
-            likeCount: post._count.likes,
-            replyCount: post._count.replies,
-          },
-          likes: post.likes,
-          replies: post.replies,
-          quoteId: post.quoteId,
-          images: post.images,
-          reposts: post.reposts
-        })),
-        nextCursor,
-      };
+        return {
+          posts: allPosts.map((post: Post) => ({
+            id: post.id,
+            createdAt: new Date(post.createdAt),
+            text: post.text,
+            parentPostId: post.parentPostId,
+            author: post.author,
+            count: {
+              likeCount: post.likes?.length,
+              replyCount: post.replies?.length,
+            },
+            likes: post.likes,
+            replies: post.replies,
+            quoteId: post.quoteId,
+            images: post.images,
+            reposts: post.reposts,
+          })),
+          nextCursor,
+        };
+      } catch (error) {
+        console.error("Error in getInfinitePost:", error);
+        throw error;
+      }
     }),
 
   getPostInfo: publicProcedure
     .input(
       z.object({
         id: z.string(),
-      })
+      }),
     )
-    .query(async ({ input, ctx }) => {
-
-      const postInfo = await ctx.db.post.findUnique({
-        where: {
-          id: input.id
-        },
-        select: {
-          id: true,
-          text: true,
-          createdAt: true,
-          images: true,
-          author: {
-            select: {
-              id: true,
-              username: true,
-              image: true,
-              bio: true,
-              _count: {
-                select: {
-                  followers: true
-                }
-              },
-            }
-          },
-          likes: {
-            select: {
-              user: {
-                select: {
-                  id: true,
-                  username: true,
-                  fullname: true,
-                  image: true,
-                  bio: true,
-                  followers: true
-                }
-              }
-            }
-          },
-          parentPost: {
-            include: {
-              likes: true,
-              ...GET_COUNT,
-              author: true,
-              parentPost: true
-            }
-          },
-          replies: {
-            select: {
-              id: true,
-              text: true,
-              createdAt: true,
-              author: {
-                select: {
-                  id: true,
-                  username: true,
-                  image: true,
-                  bio: true,
-                  _count: {
-                    select: {
-                      followers: true
-                    }
-                  },
-                }
-              },
-              ...GET_COUNT,
-              ...GET_LIKES,
-            }
-          },
-          ...GET_COUNT,
-        }
-      });
-
+    .query(async ({ input }) => {
+      const response = await fetch(
+        `http://localhost:3001/posts/${input.id}?_embed=likes&_expand=parentPost&_embed=replies`,
+      );
+      const postInfo = (await response.json()) as Post;
 
       if (!postInfo) {
-        throw new TRPCError({ code: 'NOT_FOUND' })
+        throw new TRPCError({ code: "NOT_FOUND" });
       }
 
       return {
         postInfo: {
           id: postInfo.id,
           text: postInfo.text,
-          createdAt: postInfo.createdAt,
-          likeCount: postInfo._count.likes,
-          replyCount: postInfo._count.replies,
+          createdAt: new Date(postInfo.createdAt),
+          likeCount: postInfo.likes.length,
+          replyCount: postInfo.replies.length,
           user: postInfo.author,
           parentPost: postInfo.parentPost,
           likes: postInfo.likes,
-          replies: postInfo.replies
-        }
-      }
+          replies: postInfo.replies,
+        },
+      };
     }),
 
   replyToPost: privateProcedure
@@ -270,262 +186,79 @@ export const postRouter = createTRPCRouter({
           message: "Text must be at least 3 character",
         }),
         imageUrl: z.string().optional(),
-        privacy: z.nativeEnum(PostPrivacy)
-      })
+        privacy: z.nativeEnum(PostPrivacy),
+      }),
     )
     .mutation(async ({ ctx, input }) => {
-      const { user, userId } = ctx;
-      const email = getUserEmail(user)
-      const dbUser = await ctx.db.user.findUnique({
-        where: {
-          email: email
+      const { userId } = ctx;
+      const filter = new Filter();
+      const filteredText = filter.clean(input.text);
+
+      const response = await fetch("http://localhost:3001/posts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-        select: {
-          verified: true
-        }
-      })
-
-      if (!dbUser) {
-        throw new TRPCError({ code: 'NOT_FOUND' })
-      }
-
-      const filter = new Filter()
-      const filteredText = filter.clean(input.text)
-
-      const transactionResult = await ctx.db.$transaction(async (prisma) => {
-
-        const repliedPost = await prisma.post.create({
-          data: {
-            text: filteredText,
-            images: input.imageUrl ? [input.imageUrl] : [],
-            privacy: input.privacy,
-            author: {
-              connect: {
-                id: userId,
-              },
-            },
-            parentPost: {
-              connect: {
-                id: input.postId
-              }
-            },
-          },
-          select: {
-            id: true,
-            author: true
-          }
-        })
-
-        if (userId !== input.postAuthor) {
-          await prisma.notification.create({
-            data: {
-              type: 'REPLY',
-              senderUserId: userId,
-              receiverUserId: input.postAuthor,
-              postId: input.postId,
-              message: input.text
-            }
-          });
-        }
-
-        return {
-          repliedPost,
-        };
-
+        body: JSON.stringify({
+          text: filteredText,
+          images: input.imageUrl ? [input.imageUrl] : [],
+          privacy: input.privacy,
+          authorId: userId,
+          parentPostId: input.postId,
+          createdAt: new Date().toISOString(),
+        }),
       });
 
-      if (!transactionResult) {
-        throw new TRPCError({ code: 'NOT_IMPLEMENTED' })
+      const repliedPost = (await response.json()) as Post;
+
+      if (userId !== input.postAuthor) {
+        await fetch("http://localhost:3001/notifications", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            type: "REPLY",
+            senderUserId: userId,
+            receiverUserId: input.postAuthor,
+            postId: input.postId,
+            message: input.text,
+          }),
+        });
       }
 
       return {
-        createPost: transactionResult.repliedPost,
-        success: true
-      }
-
+        createPost: repliedPost,
+        success: true,
+      };
     }),
 
   getNestedPosts: publicProcedure
     .input(
       z.object({
-        id: z.string()
-      })
+        id: z.string(),
+      }),
     )
-    .query(async ({ input, ctx }) => {
-      const { id } = input
-      const getPosts = await ctx.db.post.findUnique({
-        where: {
-          id
-        },
-        select: {
-          id: true,
-          text: true,
-          createdAt: true,
-          ...GET_COUNT,
-          images: true,
-          parentPostId: true,
-          author: {
-            select: {
-              ...GET_USER
-            }
-          },
-          ...GET_LIKES,
-          replies: {
-            select: {
-              id: true,
-              createdAt: true,
-              text: true,
-              images: true,
-              quoteId: true,
-              ...GET_REPOSTS,
-              ...GET_LIKES,
-              parentPostId: true,
-              replies: {
-                select: {
-                  author: {
-                    select: {
-                      id: true,
-                      username: true,
-                      image: true,
-                    }
-                  }
-                }
-              },
-              author: {
-                select: {
-                  ...GET_USER,
-                }
-              },
-              ...GET_COUNT,
-            },
-          },
-          quoteId: true,
-          ...GET_REPOSTS
-        },
-      });
-
-      const parentPosts = await ctx.db.$queryRaw<ParentPostsProps[]>(
-        Prisma.sql`
-          WITH RECURSIVE Posts_tree AS (
-            SELECT
-              t.*,
-              0 AS depth,
-              jsonb_build_object(
-                'id', u.id,
-                'username', u.username,
-                'image', u.image,
-                'fullname', u.fullname,
-                'bio', u.bio,
-                'link', u.link,
-                'createdAt', u.created_at,
-                'followers', COALESCE(
-                  (
-                    SELECT jsonb_agg( 
-                      jsonb_build_object('id', f.id, 'image', f.image)
-                    ) 
-                    FROM "User" f 
-                    JOIN "_followers" uf ON f.id = uf."A" 
-                    WHERE uf."B" = u.id
-                  ),
-                  '[]'
-                )
-              ) AS author,
-              (SELECT json_agg(
-                json_build_object('userId', "userId")
-              )
-              FROM "Like" 
-              WHERE "postId" = t.id
-            ) AS likes,
-              (SELECT jsonb_agg(
-                jsonb_build_object(
-                  'author', jsonb_build_object(
-                    'id', r."authorId",
-                    'username', ru.username,
-                    'image', ru.image
-                  )
-                )
-              )
-              FROM "Post" r
-              JOIN "User" ru ON r."authorId" = ru.id
-              WHERE r."parentPostId" = t.id) AS replies,
-              (SELECT count(*) FROM "Like" l WHERE l."postId" = t.id) AS like_count,
-              (SELECT count(*) FROM "Post" r WHERE r."parentPostId" = t.id) AS reply_count,
-              (SELECT "quoteId" FROM "Post" WHERE "id" = t.id) AS quote_id,
-              (SELECT jsonb_agg(jsonb_build_object('userId', "userId", 'postId', "postId")) 
-                FROM "Repost" 
-                WHERE "postId" = t.id) AS reposts
-            FROM "Post" t
-            JOIN "User" u ON t."authorId" = u.id
-            WHERE t.id = ${id}
-      
-            UNION ALL
-      
-            SELECT
-              t.*,
-              tt.depth + 1,
-              jsonb_build_object(
-                'id', u.id,
-                'username', u.username,
-                'image', u.image,
-                'fullname', u.fullname,
-                'bio', u.bio,
-                'link', u.link,
-                'createdAt', u.created_at,
-                'followers', COALESCE(
-                  (
-                    SELECT jsonb_agg( 
-                      jsonb_build_object('id', f.id, 'image', f.image)
-                    ) 
-                    FROM "User" f 
-                    JOIN "_followers" uf ON f.id = uf."A" 
-                    WHERE uf."B" = u.id
-                  ),
-                  '[]'
-                )
-              ) AS author,
-              (SELECT json_agg(
-                json_build_object('userId', "userId")
-              )
-              FROM "Like" 
-              WHERE "postId" = t.id
-            ) AS likes,
-              (SELECT jsonb_agg(
-                jsonb_build_object(
-                  'author', jsonb_build_object(
-                    'id', r."authorId",
-                    'username', ru.username,
-                    'image', ru.image
-                  )
-                )
-              )
-              FROM "Post" r
-              JOIN "User" ru ON r."authorId" = ru.id
-              WHERE r."parentPostId" = t.id) AS replies,
-              (SELECT count(*) FROM "Like" l WHERE l."postId" = t.id) AS like_count,
-              (SELECT count(*) FROM "Post" r WHERE r."parentPostId" = t.id) AS reply_count,
-              (SELECT "quoteId" FROM "Post" WHERE "id" = t.id) AS quote_id,
-              (SELECT jsonb_agg(jsonb_build_object('userId', "userId", 'postId', "postId")) 
-                FROM "Repost" 
-                WHERE "postId" = t.id) AS reposts
-            FROM "Post" t
-            JOIN "User" u ON t."authorId" = u.id
-            JOIN Posts_tree tt ON t.id = tt."parentPostId"
-          )
-      
-          SELECT *
-          FROM Posts_tree
-          ORDER BY depth;
-        `
+    .query(async ({ input }) => {
+      const { id } = input;
+      const response = await fetch(
+        `http://localhost:3001/posts/${id}?_embed=replies&_embed=likes&_embed=reposts`,
       );
+      const getPosts = (await response.json()) as Post;
+
+      const parentPostsResponse = await fetch(
+        `http://localhost:3001/posts?parentPostId=${id}&_sort=createdAt,id&_order=desc,desc`,
+      );
+      const parentPosts = (await parentPostsResponse.json()) as Post[];
 
       if (!getPosts) {
-        throw new TRPCError({ code: 'NOT_FOUND' })
+        throw new TRPCError({ code: "NOT_FOUND" });
       }
 
       return {
         postInfo: {
           id: getPosts.id,
-          createdAt: getPosts.createdAt,
+          createdAt: new Date(getPosts.createdAt),
           text: getPosts.text,
           images: getPosts.images,
           quoteId: getPosts.quoteId,
@@ -533,23 +266,22 @@ export const postRouter = createTRPCRouter({
           parentPostId: getPosts.parentPostId,
           author: getPosts.author,
           count: {
-            likeCount: getPosts._count.likes,
-            replyCount: getPosts._count.replies,
+            likeCount: getPosts.likes.length,
+            replyCount: getPosts.replies.length,
           },
           likes: getPosts.likes,
-          replies: getPosts.replies.map(({ _count, ...reply }) => ({
+          replies: getPosts.replies.map((reply) => ({
             ...reply,
             count: {
-              likeCount: _count.likes,
-              replyCount: _count.replies,
+              likeCount: reply.likes.length,
+              replyCount: reply.replies.length,
             },
           })),
         },
 
-        // TODO: need to fix type here
         parentPosts: parentPosts
-          .filter(parent => parent.id !== id)
-          .map((parent) => {
+          .filter((parent: Post) => parent.id !== id)
+          .map((parent: Post) => {
             return {
               id: parent.id,
               createdAt: new Date(parent.createdAt),
@@ -558,113 +290,92 @@ export const postRouter = createTRPCRouter({
               parentPostId: parent.parentPostId,
               author: parent.author,
               count: {
-                likeCount: Number(parent.like_count),
-                replyCount: Number(parent.reply_count),
+                likeCount: parent.likes.length,
+                replyCount: parent.replies.length,
               },
               likes: parent.likes ?? [],
               replies: parent.replies ?? [],
               quoteId: parent.quoteId,
-              reposts: parent.reposts,
+              reposts: parent.reposts ?? [],
             };
-          }).reverse()
-      }
+          })
+          .reverse(),
+      };
     }),
 
   toggleRepost: privateProcedure
-    .input(z.object({
-      id: z.string()
-    }))
+    .input(
+      z.object({
+        id: z.string(),
+      }),
+    )
     .mutation(async ({ input: { id }, ctx }) => {
-
       const { userId } = ctx;
 
-      const data = { postId: id, userId };
+      const response = await fetch(
+        `http://localhost:3001/reposts?postId=${id}&userId=${userId}`,
+      );
+      const existingRepost = (await response.json()) as Repost[];
 
-      const existingRepost = await ctx.db.repost.findUnique({
-        where: {
-          postId_userId: data
-        },
-      });
+      if (existingRepost.length === 0) {
+        const postResponse = await fetch(`http://localhost:3001/posts/${id}`);
+        const post = (await postResponse.json()) as Post;
 
-      if (existingRepost == null) {
+        const createdRepostResponse = await fetch(
+          "http://localhost:3001/reposts",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              postId: id,
+              userId,
+            }),
+          },
+        );
 
-        const transactionResult = await ctx.db.$transaction(async (prisma) => {
+        (await createdRepostResponse.json()) as Repost;
 
-          const createdRepost = await prisma.repost.create({
-            data,
-            select: {
-              post: {
-                select: {
-                  text: true,
-                  authorId: true
-                }
-              }
-            }
-          });
-
-          const createNotification = await prisma.notification.create({
-            data: {
-              type: 'REPOST',
-              postId: data.postId,
-              message: createdRepost.post.text,
-              senderUserId: userId,
-              receiverUserId: createdRepost.post.authorId
-            }
-          });
-
-          return {
-            createdRepost,
-            createNotification
-          };
-
+        await fetch("http://localhost:3001/notifications", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            type: "REPOST",
+            postId: id,
+            message: post.text,
+            senderUserId: userId,
+            receiverUserId: post.authorId,
+          }),
         });
-
-        if (!transactionResult) {
-          throw new TRPCError({ code: 'NOT_IMPLEMENTED' })
-        }
 
         return { createdRepost: true };
-
       } else {
-        const transactionResult = await ctx.db.$transaction(async (prisma) => {
+        await fetch(
+          `http://localhost:3001/reposts/${existingRepost[0]?.postId}`,
+          {
+            method: "DELETE",
+          },
+        );
 
-          const removeRepost = await prisma.repost.delete({
-            where: {
-              postId_userId: data
-            }
-          });
+        const notificationResponse = await fetch(
+          `http://localhost:3001/notifications?senderUserId=${userId}&postId=${id}&type=REPOST`,
+        );
+        const notification =
+          (await notificationResponse.json()) as Notification[];
 
-          const notification = await prisma.notification.findFirst({
-            where: {
-              senderUserId: userId,
-              postId: data.postId,
-              type: 'REPOST',
+        if (notification.length > 0) {
+          await fetch(
+            `http://localhost:3001/notifications/${notification[0]?.id}`,
+            {
+              method: "DELETE",
             },
-            select: {
-              id: true
-            }
-          });
-
-          if (notification) {
-            await prisma.notification.delete({
-              where: {
-                id: notification.id
-              }
-            });
-          }
-
-          return {
-            removeRepost,
-          }
-
-        });
-
-        if (!transactionResult) {
-          throw new TRPCError({ code: 'NOT_IMPLEMENTED' })
+          );
         }
 
         return { createdRepost: false };
-
       }
     }),
 
@@ -672,113 +383,59 @@ export const postRouter = createTRPCRouter({
     .input(
       z.object({
         id: z.string(),
-      })
+      }),
     )
-    .query(async ({ input, ctx }) => {
-
-      const postInfo = await ctx.db.post.findUnique({
-        where: {
-          id: input.id
-        },
-        select: {
-          id: true,
-          createdAt: true,
-          text: true,
-          ...GET_LIKES,
-          images: true,
-          replies: {
-            select: {
-              author: {
-                select: {
-                  id: true,
-                  username: true,
-                  image: true,
-                }
-              }
-            }
-          },
-          author: {
-            select: {
-              ...GET_USER,
-            }
-          },
-          ...GET_COUNT,
-        }
-      });
-
+    .query(async ({ input }) => {
+      const response = await fetch(
+        `http://localhost:3001/posts/${input.id}?_embed=likes&_embed=replies`,
+      );
+      const postInfo = (await response.json()) as Post;
 
       if (!postInfo) {
-        throw new TRPCError({ code: 'NOT_FOUND' })
+        throw new TRPCError({ code: "NOT_FOUND" });
       }
 
       return {
         postInfo: {
           id: postInfo.id,
           text: postInfo.text,
-          createdAt: postInfo.createdAt,
-          likeCount: postInfo._count.likes,
-          replyCount: postInfo._count.replies,
+          createdAt: new Date(postInfo.createdAt),
+          likeCount: postInfo.likes.length,
+          replyCount: postInfo.replies.length,
           user: postInfo.author,
           likes: postInfo.likes,
-          replies: postInfo.replies
-        }
-      }
+          replies: postInfo.replies,
+        },
+      };
     }),
 
   deletePost: privateProcedure
     .input(
       z.object({
         id: z.string(),
-      })
+      }),
     )
     .mutation(async ({ input, ctx }) => {
-      const { userId } = ctx
-      const transactionResult = await ctx.db.$transaction(async (prisma) => {
-        const PostInfo = await prisma.post.delete({
-          where: {
-            id: input.id,
-            authorId: userId
-          },
-          select: {
-            id: true
-          }
-        });
+      const { userId } = ctx;
+      const response = await fetch(
+        `http://localhost:3001/posts/${input.id}?authorId=${userId}`,
+      );
+      const postInfo = (await response.json()) as Post;
 
-        if (!PostInfo) {
-          throw new TRPCError({ code: 'NOT_FOUND' })
-        }
-
-        await prisma.post.updateMany({
-          where: {
-            quoteId: input.id,
-          },
-          data: {
-            quoteId: null,
-          }
-        })
-
-        return { success: true }
-      })
-
-      if (!transactionResult) {
-        throw new TRPCError({ code: 'NOT_IMPLEMENTED' })
+      if (!postInfo) {
+        throw new TRPCError({ code: "NOT_FOUND" });
       }
 
-      return { success: true }
+      await fetch(`http://localhost:3001/posts?quoteId=${input.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          quoteId: null,
+        }),
+      });
+
+      return { success: true };
     }),
 });
-
-
-
-// await ctx.prisma.post.updateMany({
-//   where: {
-//     quoteId: input.id,
-//   },
-//   data: {
-//     quoteId: null, // Update the quoteId to null or an empty string as needed
-// });
-
-// return { success: true }
-
-
-
