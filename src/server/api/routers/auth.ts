@@ -1,11 +1,12 @@
 import { z } from "zod";
 import { emailToUsername, getUserEmail } from "@/lib/utils";
 import { TRPCError } from "@trpc/server";
-import { Privacy } from "@prisma/client";
+import { Privacy } from "@/enums";
 import { generateUsername } from "@/app/_actions/generate-username";
 import { clerkClient } from "@clerk/nextjs";
 import { createTRPCRouter, privateProcedure } from "@/server/api/trpc";
 import { env } from "@/env.mjs";
+import type { DbUser } from "@/app/(pages)/layout";
 
 export const authRouter = createTRPCRouter({
   accountSetup: privateProcedure
@@ -13,7 +14,7 @@ export const authRouter = createTRPCRouter({
       z.object({
         bio: z.string(),
         link: z.string(),
-        privacy: z.nativeEnum(Privacy).default("PUBLIC"),
+        privacy: z.nativeEnum(Privacy).default(Privacy.PUBLIC),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -39,41 +40,48 @@ export const authRouter = createTRPCRouter({
 
       const fullname = getFullName(user?.firstName ?? "", user?.lastName ?? "");
 
-      const dbUser = await ctx.db.user.findUnique({
-        where: {
-          email: email,
-        },
-      });
+      const response = await fetch(
+        `http://localhost:3001/users?email=${email}`,
+      );
+      const dbUser = (await response.json()) as DbUser[];
 
-      if (!dbUser) {
-        await ctx.db.$transaction(async (prisma) => {
-          const created_user = await prisma.user.create({
-            data: {
-              id: user.id,
-              username,
-              fullname,
-              image: user.imageUrl,
-              privacy: input.privacy,
-              bio: input.bio,
-              link: input.link,
-              email,
-              verified: true,
-            },
-          });
+      if (dbUser.length === 0) {
+        const createdUserResponse = await fetch("http://localhost:3001/users", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            id: user.id,
+            username,
+            fullname,
+            image: user.imageUrl,
+            privacy: input.privacy,
+            bio: input.bio,
+            link: input.link,
+            email,
+            verified: true,
+          }),
+        });
 
-          const params = { username: created_user.username };
+        const created_user = (await createdUserResponse.json()) as DbUser;
 
-          await clerkClient.users.updateUser(userId, params);
+        const params = { username: created_user.username };
 
-          await prisma.notification.create({
-            data: {
-              isPublic: false,
-              type: "ADMIN",
-              senderUserId: env.ADMIN_USER_ID,
-              receiverUserId: created_user.id,
-              message: `Hey ${created_user.fullname}! Welcome to Threads. I hope you like this project. If so, please make sure to give it a star on GitHub and share your views on Twitter. Thanks.`,
-            },
-          });
+        await clerkClient.users.updateUser(userId, params);
+
+        await fetch("http://localhost:3001/notifications", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            isPublic: false,
+            type: "ADMIN",
+            senderUserId: env.ADMIN_USER_ID,
+            receiverUserId: created_user.id,
+            message: `Hey ${created_user.fullname}! Welcome to Threads. I hope you like this project. If so, please make sure to give it a star on GitHub and share your views on Twitter. Thanks.`,
+          }),
         });
       }
 

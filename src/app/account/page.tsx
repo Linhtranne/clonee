@@ -1,21 +1,15 @@
 import { generateUsername } from "@/app/_actions/generate-username";
 import AccountSetupForm from "@/components/auth/account-setup-form";
-import { getUserEmail } from "@/lib/utils";
-import { db } from "@/server/db";
 import { currentUser } from "@clerk/nextjs";
 import { redirect } from "next/navigation";
+import { checkAdmin } from "../_actions/seed";
 
 export default async function AccountPage() {
   const user = await currentUser();
 
   if (!user) redirect("/login");
 
-  const isVerifiedUser = await db.user.findUnique({
-    where: {
-      id: user.id,
-      email: getUserEmail(user),
-    },
-  });
+  const isVerifiedUser = await checkAdmin();
 
   if (isVerifiedUser) redirect("/");
 

@@ -1,25 +1,22 @@
 "use server";
 
-import { db } from "@/server/db";
+import { NotificationType } from "@/enums";
 import { currentUser } from "@clerk/nextjs";
 import { faker } from "@faker-js/faker";
-import { NotificationType } from "@prisma/client";
+import type { DbUser } from "../(pages)/layout";
+import { getUserEmail } from "@/lib/utils";
 
 export async function checkAdmin() {
   const user = await currentUser();
+  if (!user) return { success: false };
 
-  const res = await db.user.findUnique({
-    where: {
-      id: user?.id,
-      isAdmin: true,
-      verified: true,
-    },
-    select: {
-      username: true,
-    },
-  });
+  const response = await fetch(
+    `http://localhost:3001/users?id=${user.id}&email=${getUserEmail(user)}`,
+  );
 
-  if (!res) return { success: false };
+  const dbUser: DbUser | null = (await response.json()) as DbUser | null;
+
+  if (!dbUser) return { success: false };
 
   return { success: true };
 }
@@ -51,11 +48,17 @@ export async function createFakeUsers() {
     });
   }
 
-  const alldata = await db.user.createMany({
-    data: usersToCreate,
+  const response = await fetch("http://localhost:3001/users", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(usersToCreate),
   });
 
-  return alldata;
+  const allData = (await response.json()) as DbUser[];
+
+  return allData;
 }
 
 export async function getUsersId() {
@@ -63,17 +66,11 @@ export async function getUsersId() {
 
   if (!isAdmin) return null;
 
-  const alldata = await db.user.findMany({
-    where: {
-      verified: false,
-    },
-    take: 50,
-    select: {
-      id: true,
-    },
-  });
+  const response = await fetch("http://localhost:3001/users");
 
-  return alldata.map((user) => user.id);
+  const allData = (await response.json()) as DbUser[];
+
+  return allData.map((user) => user.id);
 }
 
 export async function createFakePost() {
@@ -97,7 +94,15 @@ export async function createFakePost() {
     posts.push(newPost);
   }
 
-  await db.post.createMany({ data: posts });
+  const response = await fetch("http://localhost:3001/posts", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(posts),
+  });
+
+  (await response.json()) as DbUser[];
 
   return { success: true };
 }
@@ -126,7 +131,15 @@ export async function createFakeNotifications() {
     notifications.push(newNotification);
   }
 
-  await db.notification.createMany({ data: notifications });
+  const response = await fetch("http://localhost:3001/notifications", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(notifications),
+  });
+
+  (await response.json()) as DbUser[];
 
   return { success: true };
 }
@@ -136,11 +149,11 @@ export async function deleteFakeUsers() {
 
   if (!isAdmin) return null;
 
-  const alldata = await db.user.deleteMany({
-    where: {
-      verified: false,
-    },
+  const response = await fetch("http://localhost:3001/users", {
+    method: "DELETE",
   });
+
+  const alldata = (await response.json()) as DbUser[];
 
   return alldata;
 }

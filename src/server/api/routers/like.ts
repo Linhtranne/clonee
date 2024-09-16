@@ -1,143 +1,110 @@
 import { z } from "zod";
 import {
-    createTRPCRouter,
-    privateProcedure,
-    publicProcedure
+  createTRPCRouter,
+  privateProcedure,
+  publicProcedure,
 } from "@/server/api/trpc";
 import { TRPCError } from "@trpc/server";
-import { GET_USER } from "@/server/constant";
+import type { Post } from "./post";
+import type { Notification } from "./notification";
+
+export interface Like {
+  id: string;
+  postId: string;
+  userId: string;
+  post: Post;
+}
 
 export const likeRouter = createTRPCRouter({
+  toggleLike: privateProcedure
+    .input(
+      z.object({
+        id: z.string(),
+      }),
+    )
+    .mutation(async ({ input: { id }, ctx }) => {
+      const { userId } = ctx;
 
-    toggleLike: privateProcedure
-        .input(z.object({
-            id: z.string()
-        }))
-        .mutation(async ({ input: { id }, ctx }) => {
+      const response = await fetch(
+        `http://localhost:3001/likes?postId=${id}&userId=${userId}`,
+      );
+      const existingLike = (await response.json()) as Like[];
 
-            const { userId } = ctx;
+      if (existingLike.length === 0) {
+        const postResponse = await fetch(`http://localhost:3001/posts/${id}`);
+        const post = (await postResponse.json()) as Post;
 
-            const data = { postId: id, userId };
+        const createdLikeResponse = await fetch("http://localhost:3001/likes", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            postId: id,
+            userId,
+          }),
+        });
 
-            const existingLike = await ctx.db.like.findUnique({
-                where: {
-                    postId_userId: data
-                },
-            });
+        (await createdLikeResponse.json()) as object;
 
-            if (existingLike == null) {
+        await fetch("http://localhost:3001/notifications", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            type: "LIKE",
+            senderUserId: userId,
+            receiverUserId: post.authorId,
+            postId: id,
+            message: post.text,
+          }),
+        });
 
-                const transactionResult = await ctx.db.$transaction(async (prisma) => {
+        return { addedLike: true };
+      } else {
+        await fetch(`http://localhost:3001/likes/${existingLike[0]?.id}`, {
+          method: "DELETE",
+        });
 
-                    const createdLike = await prisma.like.create({
-                        data,
-                        select: {
-                            post: {
-                                select: {
-                                    text: true,
-                                    author: true
-                                }
-                            }
-                        }
-                    });
+        const notificationResponse = await fetch(
+          `http://localhost:3001/notifications?senderUserId=${userId}&postId=${id}&type=LIKE`,
+        );
+        const notification =
+          (await notificationResponse.json()) as Notification[];
 
-                    const createdNotification = await prisma.notification.create({
-                        data: {
-                            type: 'LIKE',
-                            senderUserId: userId,
-                            receiverUserId: createdLike.post.author.id,
-                            postId: data.postId,
-                            message: createdLike.post.text
-                        }
-                    });
+        if (notification.length > 0) {
+          await fetch(
+            `http://localhost:3001/notifications/${notification[0]?.id}`,
+            {
+              method: "DELETE",
+            },
+          );
+        }
 
-                    return {
-                        createdLike,
-                        createdNotification
-                    };
+        return { addedLike: false };
+      }
+    }),
 
-                });
+  postLikeInfo: publicProcedure
+    .input(
+      z.object({
+        id: z.string(),
+      }),
+    )
+    .query(async ({ input }) => {
+      const response = await fetch(
+        `http://localhost:3001/posts/${input.id}?_embed=likes&_embed=reposts`,
+      );
+      const postInfo = (await response.json()) as Post;
 
-                if (!transactionResult) {
-                    throw new TRPCError({ code: 'NOT_IMPLEMENTED' })
-                }
+      if (!postInfo) {
+        throw new TRPCError({ code: "NOT_FOUND" });
+      }
 
-                return { addedLike: true };
-
-            } else {
-                const transactionResult = await ctx.db.$transaction(async (prisma) => {
-                    const removeLike = await prisma.like.delete({
-                        where: {
-                            postId_userId: data
-                        }
-                    });
-
-                    const notification = await prisma.notification.findFirst({
-                        where: {
-                            senderUserId: userId,
-                            postId: data.postId,
-                            type: 'LIKE',
-                        },
-                        select: {
-                            id: true
-                        }
-                    });
-
-                    if (notification) {
-                        await prisma.notification.delete({
-                            where: {
-                                id: notification.id
-                            }
-                        });
-                    }
-
-                    return {
-                        removeLike
-                    };
-                });
-
-                if (!transactionResult) {
-                    throw new TRPCError({ code: 'NOT_IMPLEMENTED' })
-                }
-
-                return { addedLike: false };
-            }
-        }),
-
-    postLikeInfo: publicProcedure
-        .input(
-            z.object({
-                id: z.string()
-            })
-        )
-        .query(async ({ input, ctx }) => {
-
-            const userProfileInfo = await ctx.db.post.findUnique({
-                where: {
-                    id: input.id
-                },
-                select: {
-                    likes: {
-                        select: {
-                            user: {
-                                select: {
-                                    ...GET_USER
-                                }
-                            }
-                        }
-                    },
-                    reposts: {
-                        select: {
-                            userId: true
-                        }
-                    },
-                }
-            });
-
-            if (!userProfileInfo) {
-                throw new TRPCError({ code: 'NOT_FOUND' });
-            }
-
-            return userProfileInfo
-        }),
+      return {
+        likes: postInfo.likes,
+        reposts: postInfo.reposts,
+      };
+    }),
 });

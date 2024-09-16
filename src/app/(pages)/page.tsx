@@ -24,7 +24,7 @@ const HomePage: React.FC = () => {
 
   })
 
-  const allPosts = data?.pages.flatMap((page) => page.posts)
+  const allPosts = data?.pages?.flatMap((page) => page.posts) ?? []
 
   if (isLoading) return <Loading />
   if (isError) return <Error />
